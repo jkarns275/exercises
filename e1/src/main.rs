@@ -1,3 +1,5 @@
+#![feature(const_fn)]
+
 use std::fmt::Debug;
 
 struct Yy<'y> {
@@ -6,6 +8,16 @@ struct Yy<'y> {
 
 impl<'y> Yy<'y> {
     pub fn new<'a>(s: &'a [char]) -> Yy<'a> { Yy { s } }
+
+    pub fn yynextchar(&mut self) -> Result<char, ()> {
+        if self.s.len() == 0 {
+            Err(())
+        } else {
+            let c = self.s[0];
+            self.s = &self.s[1..];
+            Ok(c)
+        }
+    }
 
     pub fn yychar(&mut self, c: char) -> Result<(), ()> {
         if self.s.len() == 0 || self.s[0usize] != c {
@@ -29,17 +41,6 @@ impl<'y> Yy<'y> {
                     Ok(ch)
                 },
                 Err(err) => Err(err)
-            }
-        }
-    }
-
-    pub fn consume_ws(&mut self) {
-        while self.s.len() != 0 {
-            let c = self.s[0];
-            if c == ' ' || c == '\t' {
-                self.s = &self.s[1..];
-            } else {
-                return
             }
         }
     }
@@ -125,7 +126,7 @@ enum Statement {
 
 #[derive(Debug, Clone)]
 struct AndExpr(pub Vec<OrExpr>);
-impl AndExpr { 
+impl AndExpr {
     pub fn new(x: Vec<OrExpr>) -> Self { AndExpr(x) }
 
     pub fn eval(&self, others: &mut Vars) -> Result<bool, Vec<char>> {
@@ -213,7 +214,7 @@ impl NotExpr {
             NotExpr::Negate(e)   => e.eval(others).map(|t| !t),
             NotExpr::Confirm(e)  => e.eval(others),
         }
-    }   
+    }
 }
 
 struct Parser<'y>(pub Yy<'y>);
@@ -227,63 +228,41 @@ impl<'y> Parser<'y> {
                 'a'...'z' => Ok(c),
                 _ => Err(format!("Invalid identifier '{}'", c))
             }
-        }, || "Encountered unexpected EOF.".to_owned())
+        }, || "Encountered unexpected EOL.".to_owned())
     }
 
     pub fn statement(&mut self) -> Result<Statement, String> {
         let original = self.0.s;
-        self.0.consume_ws();
         let id = self.id()?;
-        self.0.consume_ws();
-        if let Ok(()) = self.0.yychar('?') {
-            Ok(Statement::Query(id))
-        } else if let Ok(()) = self.0.yychar('=') {
-            Ok(Statement::Assignment(id, self.and_expr()?))
-        } else {
-            Err(format!("Expected '=' or '?', found {}", self.0.s[0]))
+        match self.0.yynextchar() {
+            Ok('?') => {
+                if self.0.s.len() == 0 {
+                    Ok(Statement::Query(id))
+                } else {
+                    Err(format!("Expected EOL, instead found '{}'", self.0.s[0]))
+                }
+            },
+            Ok('=') => Ok(Statement::Assignment(id, self.and_expr()?)),
+            Ok(_) => Err(format!("Expected '=' or '?', found {}", self.0.s[0])),
+            Err(e) => Err("Unexpected EOL.".to_string())
         }
     }
 
-    pub fn assignment(&mut self) -> Result<Statement, String> {
-        self.0.consume_ws();
-        let id = self.id()?;
-        self.0.consume_ws();
-        let _eq = self.0.yychar('=').map_err(|_| "Expected '='".to_owned())?;
-        self.0.consume_ws();
-        let expr = self.and_expr()?;
-        Ok(Statement::Assignment(id, expr))
-    }
-
-    pub fn query(&mut self) -> Result<Statement, String> {
-        self.0.consume_ws();
-        let id = self.id()?;
-        self.0.consume_ws();
-        let _qmark = self.0.yychar('?').map_err(|_| format!("Expected '?' after '{}'", id))?;
-        Ok(Statement::Query(id))
-    }
-
     pub fn expr(&mut self) -> Result<Expr, String> {
-        self.0.consume_ws();
-        let ret =
-            if let Ok(()) = self.0.yychar('(') {
-                self.0.consume_ws();
+        match self.0.yynextchar() {
+            Ok('(') => {
                 let ret = Expr::Paren(self.and_expr()?);
-                self.0.consume_ws();
                 match self.0.yychar(')') {
                     Ok(()) => Ok(ret),
                     Err(str) => Err(format!("Expected ')'."))
                 }
-            } else if let Ok(()) = self.0.yychar('1') {
-                Ok(Expr::True)
-            } else if let Ok(()) = self.0.yychar('0') {
-                Ok(Expr::False)
-            } else if let Ok(id) = self.id() {
-                Ok(Expr::Id(id))
-            } else {
-                Err(format!("Expected 'true', 'false', or '(' ~ Expr ~ ')'."))
-            };
-        self.0.consume_ws();
-        ret
+            },
+            Ok('1') => Ok(Expr::True),
+            Ok('0') => Ok(Expr::False),
+            a @ Ok('a'...'z')  => Ok(Expr::Id(a.unwrap())),
+            Ok(_) => Err(format!("Expected '1', '0', or '(' ~ Expr ~ ')'.")),
+            Err(_) => Err(format!("Unexpected EOL."))
+        }
     }
 
     pub fn and_expr(&mut self) -> Result<AndExpr, String> {
@@ -299,9 +278,8 @@ impl<'y> Parser<'y> {
     }
 
     pub fn not_expr(&mut self) -> Result<NotExpr, String> {
-        self.0.consume_ws();
         let mut i = 0;
-        while self.0.yychar('!').is_ok() { i += 1; }
+        while self.0.yychar('~').is_ok() { i += 1; }
         let expr = self.expr()?;
         Ok(match i & 1 == 0 {
             true => NotExpr::Confirm(expr),
@@ -312,14 +290,11 @@ impl<'y> Parser<'y> {
     #[inline(always)]
     fn exprrec<T, F>(&mut self, operator: char, inner: F) -> Result<Vec<T>, String>
         where F: Fn(&mut Self) -> Result<T, String> {
-        self.0.consume_ws();
         let mut exps = vec![(inner)(self)?];
         loop {
-            self.0.consume_ws();
             if let Err(()) = self.0.yychar(operator) {
                 break
             }
-            self.0.consume_ws();
             let exp = (inner)(self);
             match exp {
                 Err(err) => return Err(err),
@@ -375,7 +350,7 @@ fn main() -> io::Result<()> {
         if &buffer[..] == "end" || &buffer[..] == "quit" {
             break
         }
-        let chrs = buffer.chars().collect::<Vec<char>>();
+        let chrs = buffer.chars().filter(|x| { !("\t\n\r ".contains(*x)) }).collect::<Vec<char>>();
         let mut parser = Parser(Yy::new(&chrs[..])); 
         match parser.statement() {
             Ok(Statement::Assignment(ch, expr)) => vars.set(ch, buffer.clone(), Expr::Paren(expr)),
